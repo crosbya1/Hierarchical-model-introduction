@@ -1,0 +1,310 @@
+---
+title: "Hierarchical Modeling Introduction"
+author: "Andrew Crosby"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+
+bibliography: RepResRef.bib
+csl: ecology.csl
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The first step is to download the JAGS (Just Another Gibbs Sampler) program here: https://sourceforge.net/projects/mcmc-jags/files/JAGS/4.x/Windows/ . Make sure you've got the right version, i.e. it is compatable with your version of R (read the note at the bottom of the page). Then, make sure you have the R2jags package for R. There are several other packages for running JAGS from R, but we will stick with this one for now. 
+
+JAGS is similar to WinBUGS and uses the same language to write the models, but is much faster and less buggy[*sic*]. Both programs implement what's called a Gibbs Sampler, which is a specific alogrithm for doing the MCMC sampling in Bayesian analysis. JAGS  is a litte bit pickier about initial values but that is easy to get around. 
+
+### The Most Basic Occupancy Model
+We will begin with a basic occupancy model. Following K&eacute;ry [-@Kery2010] we will simulate data to reflect the occupancy and detection processes and then analyize it using a few different versions of a hierarhical model. The basic model reflects a simple process, where the realized occupancy state *z* at each site *i* is drawn from a bernoulli distibution with probability $\psi$:
+
+$$z_{i} \sim Bernouli(\psi)$$ 
+
+and detecion at site *i* during survey *j*, conditional on occupancy, is also the result of a Bernouli process with probability *p*:
+
+$$y_{i,j}|z_{i} \sim Bernouli(z_{i}p)$$ 
+
+We will start of with a simple exercise where we consider a situation where occupancy and detection probability are both assumed constant across the study area. This isn't realistic, but it serves to illustrate our process.
+
+```{r}
+set.seed(2)    # Set the seed so that the numbers come out the same each time
+R <- 100    # The number of sites
+T <- 3      # The number of surveys
+
+psi <- 0.7  # The probability of occupancy at each site
+p <- 0.4    # The probability of detection during each survey
+
+# Simulate the data using the above parameters
+# --------------------------------------------
+
+# Simulate the occupancy data
+presence <- rbinom(n = R, size = 1, prob = psi)    # This creates a vector of 1's and 0's where the probability of being a 1 is psi
+sum(presence)/100    # The true occuancy rate across all sites. It is slightly different from the occupancy probability because it is the result of a random process with probabiltiy psi. 
+
+# Simulate the detection process
+y <- matrix(NA, nrow = R, ncol = T)
+for(i in 1:R){
+  y[i, ] <- rbinom(n = T, size = 1, prob = p*presence[i])
+}
+
+naive.est <- sum(apply(y, 1, max))/100    # The naive estimate of occupancy (without accounting for detection)
+naive.est
+```
+
+We see from the above numbers that the true occupancy rate is `r sum(presence)/100` while the na&iuml;ve estimate (without correcting for detection) is only `r naive.est`.
+
+To analyze the above data, we will use what can be called a "model of the mean", because occupancy is assumed constant so the model is estimating the mean occupancy probability across all sites rather than individual site-level probabilities. 
+
+In the BUGS language, the model looks like this:
+``` {r, warning = FALSE, message = FALSE, eval = FALSE}
+
+sink("basic_model.txt")
+cat("
+model{
+  # The prior disturbutions on psi and p
+  psi ~ dunif(0, 1)
+  
+  p ~ dunif(0, 1)
+  
+  # The likelihood
+  for(i in 1:R){
+    # Model 1: the occupancy process
+    z[i] ~ dbern(psi)
+    
+    # Model 2: the detection process, conditional on occupancy
+    for(j in 1:T){
+      y[i, j] ~ dbern(z[i]*p)
+    }
+  }
+}
+", fill = TRUE)
+sink()
+
+    
+```
+
+I want to pasue and make a point here. The reason for simulating data is that it reflects our ideas about the data-generating process. The thing to notice about the model above is how it matches very closely to the simulation code. This is becasue the model itself reflects our assumptions about the process that generated the data. We generated the occcupancy data as 100 random draws from a binomial distribution, with a single trial at each replicate (representing a single coin flip, so a bernoulli trial), with probability of success $\psi$. In the model description, this is represented as $z_{i} \sim Bernoulli(\psi)$. In the model code above, this is specified under Model 1 as "z[i] ~ dbern(psi)." This concept that the model reflects the data-generating process is very important when learning to build Bayesian models. 
+
+``` {r, echo = FALSE, results = "hide"}
+
+basic_model <- function()
+{
+  # The prior disturbutions on psi and p
+  psi ~ dunif(0, 1)
+  
+  p ~ dunif(0, 1)
+  
+  # The likelihood
+  for(i in 1:R){
+    # Model 1: the occupancy process
+    z[i] ~ dbern(psi)
+    
+    # Model 2: the detection process, conditional on occupancy
+    for(j in 1:T){
+      y[i, j] ~ dbern(z[i]*p)
+    }
+  }
+}
+
+    
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+# Compile the data
+data <- list(R = R, T = T, y = y)
+
+# Set the parameters to monitor
+params <- c("psi", "p")
+
+# Specify the initial values - this is critical in JAGS, and is why we use the naive occupancy as initial values for z
+zinit <- apply(y, 1, max)
+inits <- function(){list(z = zinit, psi = runif(1, 0, 1), p = runif(1, 0, 1))}
+
+nc <- 3          # The number of mcmc chains to run
+ni <- 1000       # The total number of iterations (i.e. the number of random draws from the posterior distribution)
+nb <- 100        # The number of iterations used for burn-in (like a model warm-up)
+nt <- 5          # The thinning rate, meaning that the output will only save 1 out of every 5 iterations. This can save a great deal of computer memory for large models
+
+# Load the R2jags package so that R can talk to JAGS
+library(R2jags)
+```
+
+```{r, eval = FALSE}
+out <- jags(data, inits, params, model.file = "basic_model.txt", n.chains = nc, n.iter = ni, n.burnin = nb, n.thin = nt)
+print(out, digits = 2)
+
+```
+
+```{r, echo=FALSE}
+
+out <- jags(data, inits, params, model.file = basic_model, n.chains = nc, n.iter = ni, n.burnin = nb, n.thin = nt)
+print(out, digits = 2)
+```
+
+Look at the model output above for the estimate of psi. Bayesian analysis does not produce a single paramter estimate with an error (as in frequentist analysis), but rather a posterior distirbution for the parameter. So, "mu.vect" is the mean of that distribution and "sd.vect" is the standard deviation. The columns from "2.5%" through "97.5%" are the quantiles of the distribution and "n.eff" is the effective sample size (i.e. the number of iterations corrected for autocorrelation, but we won't go into that now). Finally, "Rhat" is a measure of how well the mcmc chains have converged and is a standard model diagnostic to make sure it has run enough iterations to get a good estimate. An Rhat < 1.1 is considered good, so it looks like the chains have converged. The mean parameter estimates are $\psi = 0.78$ and $p = 0.35$`, which is close to our simulated values of `r psi` and `r p`, respectively. 
+
+
+### A More Realistic Occuapncy Model
+
+Next we will simulate some data where occupancy and detection probability are both dependent on covariates, again following K&eacute;ry [-@Kery2010]. The simulated occupancy relationship will be a quadratic response to a vegetation index ranging from -1 to 1, and the detection probability will have a negative response to the same index. Therefore, the model of the occupancy relationship is:
+$$z_{i} \sim Bernoulli(\psi_i)$$ and $$logit(\psi_i) = \alpha + \beta_{1}x_i + \beta_{2}x^2_i$$
+
+The model for detection probability is: $$y_{i,j}|z_{i} \sim Bernoulli(p_{i,j}z_i)$$ and $$logit(p_{i,j}) = \alpha + \beta_{1}x_i$$
+
+Now we will simulate the data.
+```{r}
+veg <- sort(runif(n = R, min = -1, max = 1))
+
+alpha.occ <- 0
+beta1.occ <- 3
+
+```
+
+The "true" occupancy is generated by applying the parameters to the veg data at each site. The result of the equation is tranformed to a probability using the inverse-logit equation where $\psi_i = exp(\alpha + \beta X_i)/(1+exp(\alpha + \beta X_i))$.
+```{r}
+occ.prob <- exp(alpha.occ + beta1.occ*veg)/(1 + exp(alpha.occ + beta1.occ*veg))
+true.occ <- rbinom(R, 1, occ.prob)
+plot(veg, occ.prob)
+sum(true.occ)/100    # The true occupancy rate
+```
+
+The simulated detection probability follows the same format.
+```{r}
+alpha.p <- 0
+beta1.p <- -5
+
+det.prob <- exp(alpha.p + beta1.p*veg)/(1 + exp(alpha.p + beta1.p*veg))
+y <- matrix(NA, R, T)
+for(i in 1:R){
+  y[i, ] <- rbinom(T, 1, det.prob[i]*true.occ[i])
+}
+plot(veg, det.prob)
+```
+
+So, while occupancy probability increases with the vegetation index (to a point), detection probability decreases. The BUGS model is simply an extension of the previous model, with prior distirbutions on the paramters in the regression equation rather than on $\psi$ and $p$. 
+``` {r, warning = FALSE, message = FALSE, eval = FALSE}
+
+sink("model_2.txt")
+cat("
+model{
+  # The prior disturbutions on psi and p
+  alpha.occ ~ dnorm(0, 0.0001)
+  beta1.occ ~ dnorm(0, 0.0001)
+  beta2.occ ~ dnorm(0, 0.0001)
+  
+  alpha.p ~ dnorm(0, 0.0001)
+  beta1.p ~ dnorm(0, 0.0001)
+  
+  # The likelihood
+  for(i in 1:R){
+    # Model 1: the occupancy process
+    logit(psi[i]) <- alpha.occ + beta1.occ*veg[i]
+    z[i] ~ dbern(psi[i])
+    
+    # Model 2: the detection process, conditional on occupancy
+    for(j in 1:T){
+      logit(p[i, j]) <- alpha.p + beta1.p*veg[i] 
+      y[i, j] ~ dbern(z[i]*p[i, j])
+    }
+  }
+  # Derived quantities
+  occ.fs <- sum(z[])
+}
+", fill = TRUE)
+sink()
+
+    
+```
+
+A couple of things to notice about the model above: 
+
+1. The priors on the parameters follow a very wide normal distirbution with mean 0 and $\sigma^2$ = 10,000. The reason the variance parameter in the model priors is 0.0001 is that BUGS uses a $\tau$ parameter to describe variance, where $\tau = 1/\sigma^2$. Don't ask me why, it's just what they do. 
+
+2. It includes a derived paramter, "occ.fs", which is an estimate of the total number of occupied sites (out of 100). Thus, the model estimates this number at each iteration and part of the ouput is a posterior distribution of the estimated total occupancy (the sum of all $z_i$). 
+
+
+
+``` {r, echo = FALSE, results = "hide"}
+
+model_2 <- function()
+{
+  # The prior disturbutions on psi and p
+  alpha.occ ~ dnorm(0, 0.0001)
+  beta1.occ ~ dnorm(0, 0.0001)
+  beta2.occ ~ dnorm(0, 0.0001)
+  
+  alpha.p ~ dnorm(0, 0.0001)
+  beta1.p ~ dnorm(0, 0.0001)
+  
+  # The likelihood
+  for(i in 1:R){
+    # Model 1: the occupancy process
+    logit(psi[i]) <- alpha.occ + beta1.occ*veg[i]
+    z[i] ~ dbern(psi[i])
+    
+    # Model 2: the detection process, conditional on occupancy
+    for(j in 1:T){
+      logit(p[i, j]) <- alpha.p + beta1.p*veg[i] 
+      y[i, j] ~ dbern(z[i]*p[i, j])
+    }
+  }
+  # Derived quantities
+  occ.fs <- sum(z[])
+}
+
+    
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+# Compile the data
+data <- list(R = R, T = T, y = y, veg = veg)
+
+# Set the parameters to monitor
+params <- c("alpha.occ", "beta1.occ", "alpha.p", "beta1.p", "occ.fs")
+
+# Specify the initial values - this is critical in JAGS, and is why we use the naive occupancy as initial values for z
+zinit <- apply(y, 1, max)
+inits <- function(){list(z = zinit, alpha.occ = rnorm(1, 0, 1), beta1.occ = rnorm(1, 0, 1), alpha.p = rnorm(1, 0, 1), beta1.p = rnorm(1, 0, 1))}
+
+nc <- 3    
+ni <- 5000  
+nb <- 500   
+nt <- 10   
+
+```
+
+```{r, eval = FALSE}
+out2 <- jags(data, inits, params, model.file = "model_2.txt", n.chains = nc, n.iter = ni, n.burnin = nb, n.thin = nt)
+print(out2, digits = 2)
+
+```
+
+```{r, echo=FALSE}
+
+out2 <- jags(data, inits, params, model.file = model_2, n.chains = nc, n.iter = ni, n.burnin = nb, n.thin = nt)
+print(out2, digits = 2)
+```
+
+### Resources
+I hope this tutorial has been helpful. For more in-depth reading on fitting hierarchical models using Bayesian methods see K&eacute;ry [-@Kery2010], K&eacute;ry and Royle [-@Kery2016], and Royle and Dorazio [-@Royle2008]. 
+
+
+**Literature Cited** 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
